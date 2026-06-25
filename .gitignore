@@ -1,0 +1,15 @@
+# Throwaway runtime artifacts (not part of the project)
+Videos/
+bin/
+.config/
+.claude/
+.sudo_as_admin_successful
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache (also covered by nsfw-dl/.gitignore)
+__pycache__/
+*.pyc
+*.pyo

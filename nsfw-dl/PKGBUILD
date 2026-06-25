@@ -1,0 +1,70 @@
+# Maintainer: nsfw-dl contributors
+pkgname=nsfw-dl
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="GTK4/libadwaita video downloader (yt-dlp frontend) optimized for Hyprland"
+arch=('any')
+url="https://github.com/Niumination/x-downloader"
+license=('MIT')
+depends=(
+    'python'
+    'python-gobject'
+    'gtk4'
+    'libadwaita'
+    'yt-dlp'
+    'ffmpeg'
+    'desktop-file-utils'
+    'xdg-utils'
+)
+optdepends=(
+    'python-pip: required to install optional yt-dlp plugins (MissAV/91porn/Jable.tv)'
+    'webkit2gtk-4.1: not used by default, present for future WebKit integration'
+)
+provides=('nsfw-dl')
+conflicts=('nsfw-dl-git')
+options=('!strip')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/yt-dlp/yt-dlp/releases/download/nsfw-dl-$pkgver/nsfw-dl-$pkgver.tar.gz"
+        "icon.svg"
+        "icon-symbolic.svg"
+        "nsfw-dl.desktop")
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+# A "local" PKGBUILD variant: build from the current directory.
+# Use `makepkg -si` after copying this PKGBUILD into the source root.
+
+package() {
+    cd "$srcdir"
+
+    install -Dm755 "nsfw-dl" "$pkgdir/usr/bin/nsfw-dl"
+    install -Dm644 "nsfw-dl.desktop" \
+        "$pkgdir/usr/share/applications/nsfw-dl.desktop"
+
+    install -Dm644 "icon.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/nsfw-dl.svg"
+    install -Dm644 "icon-symbolic.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/nsfw-dl-symbolic.svg"
+
+    install -Dm644 /dev/stdin "$pkgdir/usr/share/licenses/$pkgname/LICENSE" <<'EOF'
+MIT License
+
+Copyright (c) nsfw-dl contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+EOF
+}

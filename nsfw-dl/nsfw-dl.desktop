@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=nsfw-dl
+GenericName=Video Downloader
+Comment=Download videos from many websites via yt-dlp
+Exec=nsfw-dl --gui %u
+Icon=nsfw-dl
+Terminal=false
+Categories=Network;AudioVideo;Utility;
+MimeType=text/x-uri;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass=nsfw-dl
+Keywords=video;download;yt-dlp;youtube;downloader;
