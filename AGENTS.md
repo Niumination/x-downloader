@@ -1,85 +1,129 @@
-# AGENTS.md
+# X-Downloader 2.0 — AGENTS.md
 
-## Project overview
+## Project Overview
 
-Single-file Python yt-dlp frontend (`nsfw-dl/nsfw-dl`, ~2000 lines). Ships both
-a GTK4/libadwaita GUI and a CLI from the same script. Primary target: Arch Linux
-+ Hyprland. Also runs on macOS with GTK4 (no libadwaita). No build step, no
-dependency manager — it's a directly runnable executable.
+Full-stack video downloader with WebSocket real-time progress, 3D interactive UI, and Tauri desktop wrapper.
 
-## Language
+**Repository:** `github.com/Niumination/x-downloader`
+**Stack:** FastAPI + Next.js 16 (React 19) + Three.js + Tauri 2
+**Legacy:** Original GTK4/CLI script lives in `nsfw-dl/` (v1.1.0)
 
-Respond in Indonesian (Bahasa Indonesia) as specified in CLAUDE.md.
+## Directory Structure
 
-## Run from source
-
-```bash
-cd nsfw-dl
-./nsfw-dl                    # GUI (default when no args)
-./nsfw-dl URL                # CLI download
-./nsfw-dl --version          # version info
-./nsfw-dl --list-sites       # dump known sites
-./nsfw-dl --check URL        # test URL support
+```
+x-downloader/
+├── backend/
+│   ├── main.py              # FastAPI server + yt-dlp engine
+│   └── requirements.txt
+├── frontend/
+│   ├── app/
+│   │   ├── page.tsx          # Main UI (landing + queue)
+│   │   ├── layout.tsx        # Root layout + metadata
+│   │   └── globals.css       # Tailwind v4 + custom styles
+│   ├── components/
+│   │   ├── DownloadOrb.tsx    # 3D download sphere (R3F)
+│   │   ├── QueueItem.tsx      # Download queue card
+│   │   ├── SettingsDialog.tsx  # Modal settings
+│   │   ├── FormatPreview.tsx   # yt-dlp -F viewer
+│   │   └── BatchImport.tsx    # Multi-URL batch dialog
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── next.config.ts
+│   └── postcss.config.mjs
+├── tauri-app/                 # Desktop wrapper (Tauri 2)
+│   ├── package.json
+│   └── src-tauri/tauri.conf.json
+├── docs/
+│   └── UI_VISUAL_EXAMPLES.md  # UI/UX style reference
+├── original/
+│   └── original-nsfw-dl.py    # Original monolithic script (backup)
+├── start.sh                   # Full-stack launcher
+├── nsfw-dl/                   # Legacy v1.1.0 (GTK4/CLI)
+├── CLAUDE.md
+└── AGENTS.md
 ```
 
-## Syntax check
+## How to Run
 
-No linter or type checker is configured. Use Python's built-in compile check:
-
+### Full Stack (recommended)
 ```bash
-python3 -m py_compile nsfw-dl/nsfw-dl
+./start.sh
+```
+Opens UI at `http://localhost:3000`, API at `http://localhost:8000/docs`.
+
+### Backend only
+```bash
+cd backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
 ```
 
-## Install / uninstall
-
+### Frontend only
 ```bash
-cd nsfw-dl
-./install.sh --plugin         # system install + MissAV plugin (needs sudo)
-./install.sh --user           # install to ~/.local, no sudo
-./uninstall.sh [--user]
+cd frontend
+npm install
+npm run dev
 ```
-
-Or via AUR: `makepkg -si` (from the `nsfw-dl/` directory).
 
 ## Architecture
 
-Everything lives in one file: `nsfw-dl/nsfw-dl`. Key sections (search for `# ----` banners):
+### Backend (`backend/main.py`)
+| Component | Description |
+|-----------|-------------|
+| **FastAPI app** | `GET /api/downloads`, `POST /api/download`, `POST /api/cancel/{id}`, `GET /api/settings`, `POST /api/settings`, `GET /api/preview-formats`, `POST /api/batch-download`, `GET /api/history` |
+| **WebSocket** | `/ws` — real-time progress broadcasts |
+| **DownloadManager** | Thread pool (6 workers), yt-dlp integration, progress hooks |
+| **SQLite** | Download history via SQLAlchemy |
+| **Site configs** | PornHub, MissAV, 91Porn, OnlyFans + generic |
 
-- **Config layer** — `load_settings()` / `save_settings()` read/write `~/.config/nsfw-dl/config.json`
-- **Site detection** — `KNOWN_SITES: dict[str, SiteConfig]` maps hostnames to per-site workarounds
-- **Options builder** — `build_ydl_opts()` translates settings + site config into yt-dlp options
-- **Download engine** — `run_download()` with two paths: Python `yt_dlp` module (preferred) and subprocess fallback (rebuilds command from opts dict — keep both paths in sync)
-- **GUI** — `gui_main()` is ~800 lines, minimal GTK4/Adw design: URL input + quality picker + download button, queue list with progress bars, settings dialog. Simple like popular video downloaders (4K Video Downloader style).
-- **CLI** — `cli_main()` handles terminal workflow
+### Frontend (`frontend/`)
+| Component | Tech | Purpose |
+|-----------|------|---------|
+| `page.tsx` | React 19 + Framer Motion | Main UI: hero, URL input, queue list, stats |
+| `DownloadOrb.tsx` | React Three Fiber + drei | 3D interactive sphere with progress ring |
+| `QueueItem.tsx` | Framer Motion | Animated download card with progress bar |
+| `SettingsDialog.tsx` | Framer Motion | Modal settings for output dir, metadata, cookies |
+| `FormatPreview.tsx` | Fetch API | Modal showing `yt-dlp -F` output |
+| `BatchImport.tsx` | React state | Multi-line URL input with batch start |
 
-## Conventions
+### Desktop (`tauri-app/`)
+Tauri 2 scaffolding. `beforeDevCommand` runs frontend dev server automatically.
 
-- **Adding a site**: add entry to `KNOWN_SITES`. Set `needs_plugin` for pip plugins. `run_download()` gates on `plugin_installed()` and surfaces install hints.
-- **Quality presets**: `FORMAT_PRESETS` dict maps preset names to yt-dlp format strings. `QUALITY_LABELS` derives from its keys.
-- **Bump version in 3 places**: `APP_VERSION` in `nsfw-dl/nsfw-dl`, `pkgver` in `PKGBUILD`, and `README.md`.
-- **Config shared**: GUI and CLI use the same `~/.config/nsfw-dl/config.json`. Changes persist across modes.
-- **Fallback download path**: if you add an option to `build_ydl_opts()`, wire it into both the Python module path AND the subprocess path in `run_download()`, or it silently won't apply in the subprocess fallback.
-- **GTK imports are lazy**: they happen inside `gui_main()` so CLI usage works without a display server.
-- **macOS GUI fallback**: if libadwaita (`Adw`) is unavailable, the GUI uses pure GTK4. Helper factories (`_make_header_bar`, `_make_switch_row`, etc.) abstract the differences. When adding new UI elements, use these helpers instead of Adw widgets directly.
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/downloads` | All active downloads |
+| POST | `/api/download` | Start download (body: `{url, quality?, cookies_browser?}`) |
+| POST | `/api/cancel/{id}` | Cancel download |
+| GET | `/api/settings` | Current settings |
+| POST | `/api/settings` | Update settings |
+| GET | `/api/preview-formats?url=` | List available formats |
+| POST | `/api/batch-download` | Start batch (body: `{urls[], quality?, cookies_browser?}`) |
+| GET | `/api/history?limit=30` | Download history from DB |
+| WS | `/ws` | Real-time progress |
 
 ## Dependencies
 
-**Arch Linux**: `python python-gobject gtk4 libadwaita yt-dlp ffmpeg desktop-file-utils`
-**macOS**: `brew install pygobject3 gtk4 yt-dlp ffmpeg` (no libadwaita needed)
-Optional: `python-pip` (for yt-dlp-plugin-yellow)
+**Backend:** `pip install -r backend/requirements.txt`
+- fastapi, uvicorn, pydantic, sqlalchemy, yt-dlp, websockets, aiofiles
 
-## Testing
+**Frontend:** `npm install` in `frontend/`
+- next, react 19, three, @react-three/fiber + drei, framer-motion, lucide-react, sonner, tailwindcss v4, radix-ui
 
-No test suite exists. Verify changes with:
-1. `python3 -m py_compile nsfw-dl/nsfw-dl` — syntax check
-2. `./nsfw-dl --version` — basic smoke test
-3. `./nsfw-dl --list-sites` — verify site table renders
-4. `./nsfw-dl --check URL` — verify URL checking works
+**Desktop:** `npm install` in `tauri-app/` then `npm run tauri dev`
+- @tauri-apps/cli
 
-## Gotchas
+## Legacy App
 
-- `install.sh` reads `APP_VERSION` from the script via `grep` — don't reformat that line.
-- The subprocess fallback in `run_download()` manually reconstructs CLI flags from the opts dict. If you add a new yt-dlp option, you must add it in both places.
-- Wayland detection: the script auto-sets `GDK_BACKEND=wayland` when `XDG_SESSION_TYPE=wayland` or `HYPRLAND_INSTANCE_SIGNATURE` is set.
-- Plugin installs use `--break-system-packages` flag for pip (PEP 668 compliance).
-- GUI helper factories (`_make_*`) are defined inside `gui_main()`. They use `HAS_ADW` flag to choose between Adw and GTK widgets. All new UI code should use these factories.
+Original v1.1.0 (GTK4/libadwaita + CLI) remains at `nsfw-dl/` for reference.
+The backup is at `original/original-nsfw-dl.py`.
+
+## Conventions
+
+- **Backend bug**: `s.dict()` in Pydantic v2 should be `s.model_dump()` — already fixed in `backend/main.py`
+- **Language**: Respond in Indonesian (Bahasa Indonesia)
+- **Bump version**: update version in `frontend/package.json`, `backend/main.py` (FASTAPI title), and `tauri-app/src-tauri/tauri.conf.json`
+- **All communication**: via REST + WebSocket, no direct filesystem access from frontend
+- **Frontend uses**: `"use client"` directive (Next.js App Router client components)
