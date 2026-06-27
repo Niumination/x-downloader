@@ -23,10 +23,19 @@ echo -e "${GREEN}[1/2] Starting Backend...${NC}"
 if [ ! -d "$BACKEND_DIR/.venv" ]; then
     echo "Creating Python virtual environment..."
     python3 -m venv "$BACKEND_DIR/.venv"
+fi
+source "$BACKEND_DIR/.venv/bin/activate"
+
+# Upgrade pip first, then install deps
+pip install --upgrade pip -q 2>/dev/null
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip install -r "$BACKEND_DIR/requirements.txt" 2>&1 | tail -5
+if [ $? -ne 0 ]; then
+    echo "pip install failed — recreating venv..."
+    rm -rf "$BACKEND_DIR/.venv"
+    python3 -m venv "$BACKEND_DIR/.venv"
     source "$BACKEND_DIR/.venv/bin/activate"
-    pip install -q -r "$BACKEND_DIR/requirements.txt"
-else
-    source "$BACKEND_DIR/.venv/bin/activate"
+    pip install --upgrade pip -q 2>/dev/null
+    PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip install -r "$BACKEND_DIR/requirements.txt"
 fi
 
 cd "$BACKEND_DIR"
