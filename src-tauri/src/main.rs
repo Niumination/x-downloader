@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::watch;
 use regex::Regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,7 +24,35 @@ struct DownloadItem {
     error: String,
 }
 
-type DownloadStore = Arc<Mutex<HashMap<i64, DownloadItem>>>;
+struct ActiveDownload {
+    item: DownloadItem,
+    /// Send `true` via this channel to kill the yt-dlp child process.
+    kill_tx: watch::Sender<bool>,
+}
+
+type DownloadStore = Arc<Mutex<HashMap<i64, ActiveDownload>>>;
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn preview_formats(url: String) -> Result<String, String> {
+    let output = Command::new("yt-dlp")
+        .arg("-F")
+        .arg(&url)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(format!("yt-dlp error: {}", stderr))
+    }
+}
 
 #[tauri::command]
 async fn start_download(
@@ -34,7 +64,8 @@ async fn start_download(
     store: tauri::State<'_, DownloadStore>,
 ) -> Result<DownloadItem, String> {
     let id = chrono::Utc::now().timestamp_millis();
-    
+    let (kill_tx, kill_rx) = watch::channel(false);
+
     let item = DownloadItem {
         id,
         url: url.clone(),
@@ -43,26 +74,45 @@ async fn start_download(
         quality: quality.clone(),
         status: "downloading".to_string(),
         progress: 0.0,
-        speed: "".to_string(),
-        eta: "".to_string(),
-        filename: "".to_string(),
-        error: "".to_string(),
+        speed: String::new(),
+        eta: String::new(),
+        filename: String::new(),
+        error: String::new(),
     };
 
+    // Insert into store BEFORE spawning so cancel_download can find it
     {
-        let mut store = store.lock().unwrap();
-        store.insert(id, item.clone());
+        let mut s = store.lock().unwrap();
+        s.insert(id, ActiveDownload {
+            item: item.clone(),
+            kill_tx,
+        });
     }
 
     let store_clone = store.inner().clone();
     let app_clone = app.clone();
-    
+
     tokio::spawn(async move {
-        run_download(id, url, quality, cookies_browser, output_dir, store_clone, app_clone).await;
+        run_download(id, url, quality, cookies_browser, output_dir, store_clone, app_clone, kill_rx).await;
     });
 
     Ok(item)
 }
+
+#[tauri::command]
+async fn cancel_download(id: i64, store: tauri::State<'_, DownloadStore>) -> Result<(), String> {
+    let store = store.lock().unwrap();
+    if let Some(active) = store.get(&id) {
+        let _ = active.kill_tx.send(true);
+        Ok(())
+    } else {
+        Err("Download not found".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Download engine
+// ---------------------------------------------------------------------------
 
 async fn run_download(
     id: i64,
@@ -72,7 +122,9 @@ async fn run_download(
     output_dir: Option<String>,
     store: DownloadStore,
     app: AppHandle,
+    mut kill_rx: watch::Receiver<bool>,
 ) {
+    // Build yt-dlp arguments
     let format = match quality.as_str() {
         "1080p" => "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
@@ -88,6 +140,7 @@ async fn run_download(
             .to_string()
     });
 
+    // Build the yt-dlp command
     let mut cmd = Command::new("yt-dlp");
     cmd.arg("--no-playlist")
         .arg("--progress")
@@ -101,6 +154,7 @@ async fn run_download(
         cmd.arg("--cookies-from-browser").arg(&cookies_browser);
     }
 
+    // Site-specific options
     if url.contains("pornhub.com") || url.contains("phncdn.com") {
         cmd.arg("--referer").arg("https://www.pornhub.com/");
         cmd.arg("--impersonate").arg("chrome");
@@ -110,49 +164,87 @@ async fn run_download(
 
     cmd.arg(&url);
 
-    let mut child = match cmd.stdout(std::process::Stdio::piped()).spawn() {
+    // Spawn child
+    let mut child = match cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() {
         Ok(child) => child,
         Err(e) => {
-            update_download_status(&store, id, "error", 0.0, "", "", "", &format!("Failed to start: {}", e), &app);
+            update_status(&store, id, "error", 0.0, "", "", "", &format!("Failed to start: {}", e), &app);
+            cleanup_store(&store, id);
             return;
         }
     };
 
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    
-    if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
+    // Read stdout line-by-line, racing against the cancel signal
+    let stdout = child.stdout.take().expect("stdout captured");
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
 
-        while let Some(line) = lines.next_line().await.unwrap_or(None) {
-            parse_progress_line(&line, &store, id, &app);
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = kill_rx.changed() => {
+                // Value changed — check if we should cancel
+                if *kill_rx.borrow() {
+                    let _ = child.kill().await;      // SIGKILL on Unix
+                    let _ = child.wait().await;       // reap
+                    update_status(&store, id, "cancelled", 0.0, "", "", "", "", &app);
+                    cleanup_store(&store, id);
+                    return;
+                }
+            }
+
+            result = lines.next_line() => {
+                match result {
+                    Ok(Some(line)) => parse_progress(&line, &store, id, &app),
+                    Ok(None) => break,   // EOF — download finished
+                    Err(_) => break,     // I/O error
+                }
+            }
         }
     }
 
-    let status = child.wait().await;
+    // Wait for exit status
+    let exit_status = child.wait().await;
 
-    if let Ok(exit_status) = status {
-        if exit_status.success() {
-            update_download_status(&store, id, "completed", 100.0, "", "", "", "", &app);
+    if let Ok(status) = exit_status {
+        if status.success() {
+            // Try to extract title from the output filename (last progress line)
+            update_status(&store, id, "completed", 100.0, "", "", "", "", &app);
         } else {
-            update_download_status(&store, id, "error", 0.0, "", "", "", "Download failed", &app);
+            update_status(&store, id, "error", 0.0, "", "", "", "Download failed", &app);
         }
+    } else {
+        update_status(&store, id, "error", 0.0, "", "", "", "Process wait error", &app);
     }
+
+    cleanup_store(&store, id);
 }
 
-fn parse_progress_line(line: &str, store: &DownloadStore, id: i64, app: &AppHandle) {
-    let re = Regex::new(r"\[download\]\s+(\d+\.?\d*)%\s+of\s+[\d.]+\w+\s+at\s+([\d.]+\w+/s)\s+ETA\s+([\d:]+)").unwrap();
-    
+// ---------------------------------------------------------------------------
+// Progress parsing
+// ---------------------------------------------------------------------------
+
+fn parse_progress(line: &str, store: &DownloadStore, id: i64, app: &AppHandle) {
+    // yt-dlp --newline outputs lines like:
+    //   [download]  45.2% of ~25.4MiB at 3.2MiB/s ETA 00:05
+    let re = Regex::new(
+        r"\[download\]\s+(\d+\.?\d*)%\s+of\s+[\d.]+[KMGTP]?i?B\s+at\s+([\d.]+[KMGTP]?i?B/s)\s+ETA\s+([\d:]+)"
+    ).unwrap();
+
     if let Some(caps) = re.captures(line) {
         let progress: f64 = caps[1].parse().unwrap_or(0.0);
         let speed = caps[2].to_string();
         let eta = caps[3].to_string();
-
-        update_download_status(store, id, "downloading", progress, &speed, &eta, "", "", app);
+        update_status(store, id, "downloading", progress, &speed, &eta, "", "", app);
     }
 }
 
-fn update_download_status(
+// ---------------------------------------------------------------------------
+// Status helpers
+// ---------------------------------------------------------------------------
+
+fn update_status(
     store: &DownloadStore,
     id: i64,
     status: &str,
@@ -163,35 +255,40 @@ fn update_download_status(
     error: &str,
     app: &AppHandle,
 ) {
-    let mut store = store.lock().unwrap();
-    
-    if let Some(item) = store.get_mut(&id) {
+    let mut s = store.lock().unwrap();
+    if let Some(active) = s.get_mut(&id) {
+        let item = &mut active.item;
         item.status = status.to_string();
         item.progress = progress;
-        item.speed = speed.to_string();
-        item.eta = eta.to_string();
+        if !speed.is_empty() { item.speed = speed.to_string(); }
+        if !eta.is_empty() { item.eta = eta.to_string(); }
         if !filename.is_empty() { item.filename = filename.to_string(); }
         if !error.is_empty() { item.error = error.to_string(); }
-        
+
         let _ = app.emit("download-update", item.clone());
     }
 }
 
-#[tauri::command]
-async fn cancel_download(id: i64, store: tauri::State<'_, DownloadStore>) -> Result<(), String> {
-    let mut store = store.lock().unwrap();
-    if let Some(item) = store.get_mut(&id) {
-        item.status = "cancelled".to_string();
-    }
-    Ok(())
+fn cleanup_store(store: &DownloadStore, id: i64) {
+    let mut s = store.lock().unwrap();
+    s.remove(&id);
 }
+
+// ---------------------------------------------------------------------------
+// Entrypoint
+// ---------------------------------------------------------------------------
 
 fn main() {
     let store: DownloadStore = Arc::new(Mutex::new(HashMap::new()));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(store)
-        .invoke_handler(tauri::generate_handler![start_download, cancel_download])
+        .invoke_handler(tauri::generate_handler![
+            start_download,
+            cancel_download,
+            preview_formats,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

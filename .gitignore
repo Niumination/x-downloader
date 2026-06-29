@@ -16,8 +16,12 @@ __pycache__/
 
 # Node
 node_modules/
+dist/
 .next/
 *.tsbuildinfo
+
+# Rust / Tauri
+src-tauri/target/
 
 # Python venv
 backend/.venv/
